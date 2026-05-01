@@ -47,15 +47,13 @@ async def read_serial():
         
         while True:
             if ser.in_waiting > 0:
-                line = ser.readline().decode('utf-8').strip()
+                line = ser.readline().decode('utf-8', errors='ignore').strip().replace('\r','')
                 print(f"Received: {line}")
                 
-                if line == "MODE:IDLE":
-                    await broadcast("IDLE")
-                elif line == "MODE:CONVENTIONAL":
-                    await broadcast("CONVENTIONAL")
-                elif line == "MODE:FISH":
-                    await broadcast("FISH")
+                if line.startswith("MODE:"):
+                    mode = line.split(":")[1].strip()
+                    print(f">>> Broadcasting: {mode}")
+                    await broadcast(mode)
             
             await asyncio.sleep(0.05)
     

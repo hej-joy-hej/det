@@ -48,9 +48,10 @@
         ws.onopen = () => { console.log('Connected to server'); };
         ws.onmessage = (event) => {
             const mode = event.data;
-            console.log('Received:', mode);
-            if (mode === current) return;
-            if (!elements[mode]) return;
+            console.log('Received:', mode, 'Current:', current, 'Element exists:', !!elements[mode]);
+            if (mode === current) { console.log('SKIP: same as current'); return; }
+            if (!elements[mode]) { console.log('SKIP: no element for mode'); return; }
+            console.log('Switching to:', mode);
 
             // hide current
             elements[current].classList.remove('visible');
@@ -63,7 +64,7 @@
             // show new
             if (mode !== 'IDLE') {
                 elements[mode].currentTime = 0;
-                elements[mode].play();
+                elements[mode].play().catch(e => console.error('Play error:', e));
             }
             elements[mode].classList.remove('hidden');
             elements[mode].classList.add('visible');
