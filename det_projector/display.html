@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Art Installation Display</title>
+    <style>
+        * { margin: 0; padding: 0; overflow: hidden; }
+        body { background: black; width: 100vw; height: 100vh; cursor: none; }
+        #idle, #conventional, #fish {
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            width: 100%; height: 100%; object-fit: cover;
+            transition: opacity 0.5s ease;
+        }
+        #idle { background: black; }
+        .hidden { opacity: 0; pointer-events: none; }
+        .visible { opacity: 1; }
+        #start-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: black; display: flex; justify-content: center;
+            align-items: center; cursor: pointer; z-index: 100;
+        }
+        #start-overlay span { color: white; font-family: sans-serif; font-size: 24px; }
+    </style>
+</head>
+<body>
+    <div id="start-overlay"><span>Click to begin</span></div>
+    <div id="idle" class="visible"></div>
+    <video id="conventional" src="conventional.mp4" loop muted playsinline class="hidden"></video>
+    <video id="fish" src="fish.mp4" loop muted playsinline class="hidden"></video>
+    <script>
+        const elements = {
+            IDLE: document.getElementById('idle'),
+            CONVENTIONAL: document.getElementById('conventional'),
+            FISH: document.getElementById('fish')
+        };
+        let current = 'IDLE';
+
+        const overlay = document.getElementById('start-overlay');
+        overlay.addEventListener('click', () => {
+            elements.CONVENTIONAL.play().then(() => { elements.CONVENTIONAL.pause(); elements.CONVENTIONAL.currentTime = 0; });
+            elements.FISH.play().then(() => { elements.FISH.pause(); elements.FISH.currentTime = 0; });
+            overlay.style.display = 'none';
+        }, { once: true });
+
+        const ws = new WebSocket('ws://localhost:8765');
+        ws.onopen = () => { console.log('Connected to server'); };
+        ws.onmessage = (event) => {
+            const mode = event.data;
+            console.log('Received:', mode);
+            if (mode === current) return;
+            if (!elements[mode]) return;
+
+            // hide current
+            elements[current].classList.remove('visible');
+            elements[current].classList.add('hidden');
+            if (current !== 'IDLE') {
+                const old = current;
+                setTimeout(() => { elements[old].pause(); }, 600);
+            }
+
+            // show new
+            if (mode !== 'IDLE') {
+                elements[mode].currentTime = 0;
+                elements[mode].play();
+            }
+            elements[mode].classList.remove('hidden');
+            elements[mode].classList.add('visible');
+
+            current = mode;
+        };
+        ws.onerror = (error) => { console.error('WebSocket error:', error); };
+        ws.onclose = () => { console.log('Disconnected from server'); };
+    </script>
+</body>
+</html>
