@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      overflow: hidden;
+      background: #000;
+      cursor: none;
+    }
+
+    #bg {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      object-fit: cover;
+      z-index: 0;
+    }
+
+    canvas {
+      position: fixed;
+      top: 0;
+      left: 0;
+      z-index: 1;
+      display: block;
+    }
+  </style>
+</head>
+
+<body>
+  <video id="bg" autoplay loop muted playsinline>
+    <source src="water.mp4" type="video/mp4">
+  </video>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+  <script>
+    const NUM_FISH = 22;
+    let fishes = [];
+
+    function setup() {
+      createCanvas(windowWidth, windowHeight);
+      for (let i = 0; i < NUM_FISH; i++) fishes.push(new Fish());
+      fishes.sort((a, b) => a.size - b.size);
+    }
+
+    function windowResized() {
+      resizeCanvas(windowWidth, windowHeight);
+    }
+
+    class Fish {
+      constructor() {
+        this.size = random(22, 55);
+        this.x = random(width * 0.1, width * 0.9);
+        this.y = random(height * 0.1, height * 0.9);
+        this.heading = random(TWO_PI);
+        let spd = this.baseSpeed();
+        this.vx = cos(this.heading) * spd;
+        this.vy = sin(this.heading) * spd;
+        this.phase = random(TWO_PI);
+        this.freq = random(3.0, 4.5);
+        this.amp = random(0.12, 0.24);
+        this.opacity = map(this.size, 22, 55, 115, 200);
+
+        this.nOff = random(1000);
+        this.nSpeed = random(0.0004, 0.001);
+
+        this.bodyWidth = random(0.36, 0.48);
+        this.noseTaper = random(0.10, 0.16);
+        this.noseMinW = random(0.3, 0.45);
+        this.widestPt = random(0.25, 0.38);
+        this.taperStart = random(0.45, 0.58);
+        this.peduncle = random(0.78, 0.86);
+        this.peduncleW = random(0.16, 0.24);
+        this.tailFlare = random(0.4, 0.7);
+        this.forkLen = random(0.38, 0.55);
+        this.forkSpread = random(0.25, 0.38);
+
+        this.dorsalPeak = random(0.28, 0.38);
+        this.dorsalH = random(0.12, 0.25);
+        this.dorsalWidth = random(0.12, 0.20);
+        this.ventralPos = random(0.55, 0.65);
+        this.ventralH = random(0.06, 0.14);
+
+        this.pectFinPos = random(0.22, 0.32);
+        this.pectFinLen = random(0.4, 0.7);
+      }
+
+      baseSpeed() {
+        return map(this.size, 22, 55, 0.3, 1.0);
+      }
+
+      update() {
+        let spd = this.baseSpeed();
+        let n = noise(this.nOff + frameCount * this.nSpeed);
+        let targetAngle = this.heading + (n - 0.5) * 0.7;
+
+        let margin = max(this.size * 3, 100);
+        let ex = 0, ey = 0;
+        if (this.x < margin) ex = map(this.x, 0, margin, 0.03, 0);
+        if (this.x > width - margin) ex = map(this.x, width - margin, width, 0, -0.03);
+        if (this.y < margin) ey = map(this.y, 0, margin, 0.03, 0);
+        if (this.y > height - margin) ey = map(this.y, height - margin, height, 0, -0.03);
+
+        let sepX = 0, sepY = 0;
+        let minDist = this.size * 5;
+        for (let other of fishes) {
+          if (other === this) continue;
+          let dx = this.x - other.x;
+          let dy = this.y - other.y;
+          let d = sqrt(dx * dx + dy * dy);
+          if (d < minDist && d > 0.1) {
+            let force = (minDist - d) / minDist * 0.015;
+            sepX += (dx / d) * force;
+            sepY += (dy / d) * force;
+          }
+        }
+
+        let tx = cos(targetAngle) * spd + ex + sepX;
+        let ty = sin(targetAngle) * spd + ey + sepY;
+        this.vx = lerp(this.vx, tx, 0.02);
+        this.vy = lerp(this.vy, ty, 0.02);
+
+        let curSpd = sqrt(this.vx * this.vx + this.vy * this.vy);
+        if (curSpd > 0.01) {
+          this.vx = (this.vx / curSpd) * spd;
+          this.vy = (this.vy / curSpd) * spd;
+        }
+
+        this.x += this.vx;
+        this.y += this.vy;
+        this.heading = atan2(this.vy, this.vx);
+
+        let buf = this.size * 5;
+        if (this.x < -buf) this.x += width + buf * 2;
+        if (this.x > width + buf) this.x -= width + buf * 2;
+        if (this.y < -buf) this.y += height + buf * 2;
+        if (this.y > height + buf) this.y -= height + buf * 2;
+      }
+
+      baseBodyW(frac) {
+        if (frac < this.noseTaper) {
+          let t = frac / this.noseTaper;
+          return this.noseMinW + (1.0 - this.noseMinW) * sin(t * HALF_PI);
+        } else if (frac < this.widestPt) {
+          return 1.0;
+        } else if (frac < this.taperStart) {
+          return 1.0;
+        } else if (frac < this.peduncle) {
+          let t = (frac - this.taperStart) / (this.peduncle - this.taperStart);
+          return lerp(1.0, this.peduncleW, t);
+        } else if (frac < this.peduncle + 0.04) {
+          return this.peduncleW;
+        } else {
+          let t = map(frac, this.peduncle + 0.04, 1.0, 0, 1);
+          return this.peduncleW + t * t * this.tailFlare;
+        }
+      }
+
+      bump(frac, center, width, height) {
+        let d = abs(frac - center) / width;
+        if (d > 1) return 0;
+        return height * (1 + cos(d * PI)) * 0.5;
+      }
+
+      draw(t) {
+        let s = this.size;
+        let segs = 48;
+        let bodyLen = s * 3.2;
+        let hdx = cos(this.heading);
+        let hdy = sin(this.heading);
+        let prx = -hdy;
+        let pry = hdx;
+
+        let spine = [];
+        for (let i = 0; i <= segs; i++) {
+          let f = i / segs;
+          let wave = sin(t * this.freq + this.phase + f * PI * 2.2);
+          let lat = wave * this.amp * s * f * f;
+          spine.push({
+            x: this.x - hdx * f * bodyLen + prx * lat,
+            y: this.y - hdy * f * bodyLen + pry * lat
+          });
+        }
+
+        let dorsalAnim = sin(t * this.freq * 0.5 + this.phase) * 0.02 + this.dorsalH;
+        let ventralAnim = sin(t * 1.3 + this.phase + 1.0) * 0.03 + this.ventralH;
+
+        let halfW = s * this.bodyWidth;
+        let topPts = [];
+        let botPts = [];
+
+        for (let i = 0; i <= segs; i++) {
+          let f = i / segs;
+          let base = this.baseBodyW(f);
+          let dorsal = this.bump(f, this.dorsalPeak, this.dorsalWidth, dorsalAnim);
+          let ventral = this.bump(f, this.ventralPos, 0.08, ventralAnim);
+
+          let topW = (base + dorsal) * halfW;
+          let botW = (base + ventral) * halfW;
+
+          let dx, dy;
+          if (i < segs) { dx = spine[i + 1].x - spine[i].x; dy = spine[i + 1].y - spine[i].y; }
+          else { dx = spine[i].x - spine[i - 1].x; dy = spine[i].y - spine[i - 1].y; }
+          let len = sqrt(dx * dx + dy * dy) || 1;
+          let nx = -dy / len;
+          let ny = dx / len;
+
+          topPts.push({ x: spine[i].x + nx * topW, y: spine[i].y + ny * topW });
+          botPts.push({ x: spine[i].x - nx * botW, y: spine[i].y - ny * botW });
+        }
+
+        fill(35, 30, 25, 255);
+        noStroke();
+
+        beginShape();
+        for (let i = 0; i <= segs; i++) vertex(topPts[i].x, topPts[i].y);
+
+        let tail = spine[segs];
+        let pre = spine[segs - 3];
+        let tdx = tail.x - pre.x;
+        let tdy = tail.y - pre.y;
+        let tl = sqrt(tdx * tdx + tdy * tdy) || 1;
+        tdx /= tl; tdy /= tl;
+        let tnx = -tdy, tny = tdx;
+        let fl = s * this.forkLen;
+        let fs = s * this.forkSpread;
+        let flick = sin(t * this.freq + this.phase + PI * 2.5) * s * 0.1;
+
+        vertex(tail.x + tdx * fl + tnx * fs + flick * tnx, tail.y + tdy * fl + tny * fs + flick * tny);
+        vertex(tail.x + tdx * fl * 0.2, tail.y + tdy * fl * 0.2);
+        vertex(tail.x + tdx * fl - tnx * fs + flick * tnx, tail.y + tdy * fl - tny * fs + flick * tny);
+
+        for (let i = segs; i >= 0; i--) vertex(botPts[i].x, botPts[i].y);
+        endShape(CLOSE);
+
+        let pIdx = floor(segs * this.pectFinPos);
+        let pLen = s * this.pectFinLen;
+        let pWave = sin(t * 1.6 + this.phase) * 0.12;
+
+        let pdx, pdy;
+        if (pIdx < segs) { pdx = spine[pIdx + 1].x - spine[pIdx].x; pdy = spine[pIdx + 1].y - spine[pIdx].y; }
+        else { pdx = spine[pIdx].x - spine[pIdx - 1].x; pdy = spine[pIdx].y - spine[pIdx - 1].y; }
+        let pdl = sqrt(pdx * pdx + pdy * pdy) || 1;
+        pdx /= pdl; pdy /= pdl;
+        let ppx, ppy;
+        if (pIdx < segs) { ppx = -(spine[pIdx + 1].y - spine[pIdx].y); ppy = spine[pIdx + 1].x - spine[pIdx].x; }
+        else { ppx = -(spine[pIdx].y - spine[pIdx - 1].y); ppy = spine[pIdx].x - spine[pIdx - 1].x; }
+        let ppl = sqrt(ppx * ppx + ppy * ppy) || 1;
+        ppx /= ppl; ppy /= ppl;
+
+        let pIdx2 = min(pIdx + floor(segs * 0.06), segs);
+
+        let tb = topPts[pIdx];
+        beginShape();
+        vertex(tb.x, tb.y);
+        bezierVertex(
+          tb.x + ppx * pLen * 0.45 + pdx * pLen * 0.15 + ppx * pWave * s,
+          tb.y + ppy * pLen * 0.45 + pdy * pLen * 0.15 + ppy * pWave * s,
+          tb.x + ppx * pLen * 0.35 + pdx * pLen * 0.55 + ppx * pWave * s * 0.5,
+          tb.y + ppy * pLen * 0.35 + pdy * pLen * 0.55 + ppy * pWave * s * 0.5,
+          tb.x + ppx * pLen * 0.2 + pdx * pLen * 0.85,
+          tb.y + ppy * pLen * 0.2 + pdy * pLen * 0.85
+        );
+        bezierVertex(
+          topPts[pIdx2].x + pdx * pLen * 0.3,
+          topPts[pIdx2].y + pdy * pLen * 0.3,
+          topPts[pIdx2].x, topPts[pIdx2].y,
+          topPts[pIdx2].x, topPts[pIdx2].y
+        );
+        endShape(CLOSE);
+
+        let bb = botPts[pIdx];
+        beginShape();
+        vertex(bb.x, bb.y);
+        bezierVertex(
+          bb.x - ppx * pLen * 0.45 + pdx * pLen * 0.15 - ppx * pWave * s,
+          bb.y - ppy * pLen * 0.45 + pdy * pLen * 0.15 - ppy * pWave * s,
+          bb.x - ppx * pLen * 0.35 + pdx * pLen * 0.55 - ppx * pWave * s * 0.5,
+          bb.y - ppy * pLen * 0.35 + pdy * pLen * 0.55 - ppy * pWave * s * 0.5,
+          bb.x - ppx * pLen * 0.2 + pdx * pLen * 0.85,
+          bb.y - ppy * pLen * 0.2 + pdy * pLen * 0.85
+        );
+        bezierVertex(
+          botPts[pIdx2].x + pdx * pLen * 0.3,
+          botPts[pIdx2].y + pdy * pLen * 0.3,
+          botPts[pIdx2].x, botPts[pIdx2].y,
+          botPts[pIdx2].x, botPts[pIdx2].y
+        );
+        endShape(CLOSE);
+      }
+    }
+
+    function draw() {
+      clear();
+      let t = frameCount * 0.04;
+      for (let fish of fishes) {
+        fish.update();
+        fish.draw(t);
+      }
+    }
+  </script>
+</body>
+
+</html>
