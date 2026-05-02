@@ -211,8 +211,4 @@ void loop() {
     sendValue(Serial3, currentMode, co2_value);
     sendValue(Serial4, currentMode, co2_value);
   }
-}   sendValue(Serial2, currentMode, co2_value);
-    sendValue(Serial3, currentMode, co2_value);
-    sendValue(Serial4, currentMode, co2_value);
-  }
 }

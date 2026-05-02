@@ -1,19 +1,33 @@
 import serial
+import serial.tools.list_ports
 import asyncio
 import websockets
 import time
-import glob
+import sys
 
-SERIAL_PORT = '/dev/cu.usbmodem1101'
+SERIAL_PORT_WINDOWS = 'COM3'
+SERIAL_PORT_MAC     = '/dev/cu.usbmodem1101'
 BAUD_RATE = 9600
 
 clients = set()
 
 def find_arduino_port():
-    ports = glob.glob('/dev/cu.usbmodem*') + glob.glob('/dev/cu.usbserial*')
-    if ports:
-        return ports[0]
-    return None
+    if sys.platform == 'win32':
+        ports = list(serial.tools.list_ports.comports())
+        print(f"Available COM ports: {[f'{p.device} ({p.description})' for p in ports]}")
+        for p in ports:
+            desc = p.description.lower()
+            if any(k in desc for k in ('arduino', 'ch340', 'usb serial', 'usbserial')):
+                print(f"Auto-detected: {p.device} ({p.description})")
+                return p.device
+        if ports:
+            print(f"No Arduino keyword match — using first available: {ports[0].device}")
+            return ports[0].device
+        return None
+    else:
+        import glob
+        ports = glob.glob('/dev/cu.usbmodem*') + glob.glob('/dev/cu.usbserial*')
+        return ports[0] if ports else None
 
 async def handle_client(websocket):
     clients.add(websocket)
@@ -37,7 +51,7 @@ async def read_serial():
         print(f"Found Arduino on: {port}")
         serial_port = port
     else:
-        serial_port = SERIAL_PORT
+        serial_port = SERIAL_PORT_WINDOWS if sys.platform == 'win32' else SERIAL_PORT_MAC
         print(f"Using configured port: {serial_port}")
     
     try:
