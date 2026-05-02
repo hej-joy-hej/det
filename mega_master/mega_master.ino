@@ -28,8 +28,8 @@ SoftwareSerial Serial4(-1, 12);
 #define PN532_RESET -1
 Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET, &Wire);
 
-const uint8_t UID_A[] = {0x04, 0x2B, 0x9A, 0xAA, 0x96, 0x20, 0x91};
-const uint8_t UID_B[] = {0x04, 0x2B, 0x9B, 0xAA, 0x96, 0x20, 0x91};
+const uint8_t UID_A[] = {0x04, 0x2B, 0x9C, 0xAA, 0x96, 0x20, 0x91};
+const uint8_t UID_B[] = {0x04, 0x2B, 0x9D, 0xAA, 0x96, 0x20, 0x91};
 const uint8_t UID_LEN = 7;
 
 // ---------- Servo ----------
@@ -190,6 +190,12 @@ void loop() {
         }
       } else {
         Serial.println("Unknown card");
+        for (uint8_t i = 0; i < uidLength; i++) {
+          if (uid[i] < 0x10) Serial.print("0");
+          Serial.print(uid[i], HEX);
+          if (i < uidLength - 1) Serial.print(":");
+        }
+        Serial.println();
       }
     }
   }
@@ -202,6 +208,10 @@ void loop() {
 
     sendValue(Serial1, currentMode, co2_value);
     sendValue(Serial2, currentMode, co2_value);
+    sendValue(Serial3, currentMode, co2_value);
+    sendValue(Serial4, currentMode, co2_value);
+  }
+}   sendValue(Serial2, currentMode, co2_value);
     sendValue(Serial3, currentMode, co2_value);
     sendValue(Serial4, currentMode, co2_value);
   }

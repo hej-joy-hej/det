@@ -1,4 +1,4 @@
-// CO2 Halftone Display — Uno Slave
+// Halftone Display — Uno Slave
 // Receives mode + float value from Mega master over Serial (pin 0 RX).
 //
 // IMPORTANT: Unplug the wire from D0 before uploading via USB.
@@ -23,8 +23,9 @@ MCUFRIEND_kbv tft;
 
 // ---------- Mode definitions (must match master) ----------
 #define MODE_IDLE  0
-#define MODE_CO2   1
+#define MODE_GHG   1
 #define MODE_WATER 2
+#define MODE_BIO   3
 
 struct ModeConfig {
   const char* label1;
@@ -36,9 +37,10 @@ struct ModeConfig {
 };
 
 const ModeConfig modes[] = {
-  {"",        "",        "",   0.0,   1.0,   0},   // MODE_IDLE
-  {"Carbon",  "Dioxide", "mg", 10.0,  20.0,  2},   // MODE_CO2
-  {" Water",  " Level",  "cm", 100.0, 900.0, 0},   // MODE_WATER
+  {"",           "",          "",  0.0, 1.0,   0},   // MODE_IDLE
+  {"Greenhouse", "  Gases",   "",  0.0, 100.0, 0},   // MODE_GHG
+  {"  Water",    " Quality",  "",  0.0, 100.0, 0},   // MODE_WATER
+  {"  Bio-",     "diversity", "",  0.0, 100.0, 0},   // MODE_BIO
 };
 
 // ---------- Grid ----------
@@ -63,7 +65,7 @@ const uint8_t PROGMEM BAYER[8][8] = {
 };
 
 // ---------- State ----------
-float displayValue = 15.0;
+float displayValue = 0.0;
 uint8_t activeMode = MODE_IDLE;
 uint8_t rxMode = MODE_IDLE;
 unsigned long lastDotTime = 0;
