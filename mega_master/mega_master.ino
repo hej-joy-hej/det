@@ -28,16 +28,16 @@ SoftwareSerial Serial4(-1, 12);
 #define PN532_RESET -1
 Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET, &Wire);
 
-const uint8_t UID_A[] = {0x04, 0x2B, 0x97, 0xAA, 0x96, 0x20, 0x91};
-const uint8_t UID_B[] = {0x04, 0x2B, 0x99, 0xAA, 0x96, 0x20, 0x91};
+const uint8_t UID_A[] = {0x04, 0x2B, 0x9A, 0xAA, 0x96, 0x20, 0x91};
+const uint8_t UID_B[] = {0x04, 0x2B, 0x9B, 0xAA, 0x96, 0x20, 0x91};
 const uint8_t UID_LEN = 7;
 
 // ---------- Servo ----------
 Servo myservo;
-#define SERVO_PIN   9
+#define SERVO_PIN   26
 #define ORIGIN      90
-#define LEFT        0
-#define RIGHT       180
+#define LEFT        30
+#define RIGHT       150
 
 unsigned long servoMoveTime = 0;
 bool servoReturning = false;
@@ -127,12 +127,13 @@ void setup() {
   }
   nfc.SAMConfig();
   Serial.println("Mega master started — waiting for NFC tap");
+  Serial.println("MODE:IDLE");
 }
 
 // ---------- Main loop ----------
 void loop() {
   unsigned long now = millis();
-  Serial.println(now);
+  
 
   // --- Non-blocking servo return ---
   if (servoReturning && now - servoMoveTime >= 1500) {
@@ -147,13 +148,14 @@ void loop() {
     currentMode = MODE_IDLE;
     setPumps(MODE_IDLE);
     Serial.println("Timeout — back to idle");
+    Serial.println("MODE:IDLE");
   }
 
   // --- NFC read with cooldown ---
   if (now - lastTapTime >= TAP_COOLDOWN) {
-    Serial.println("NFC: SAMConfig...");
+    //Serial.println("NFC: SAMConfig...");
     nfc.SAMConfig();
-    Serial.println("NFC: reading...");
+    //Serial.println("NFC: reading...");
     uint8_t uid[7];
     uint8_t uidLength;
     if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 500)) {
@@ -166,6 +168,7 @@ void loop() {
           currentMode = MODE_CONVENTIONAL;
           modeStartTime = now;
           setPumps(MODE_CONVENTIONAL);
+          Serial.println("MODE:CONVENTIONAL");
           myservo.attach(SERVO_PIN);
           myservo.write(LEFT);
           servoMoveTime = now;
@@ -179,6 +182,7 @@ void loop() {
           currentMode = MODE_FISH;
           modeStartTime = now;
           setPumps(MODE_FISH);
+          Serial.println("MODE:FISH");
           myservo.attach(SERVO_PIN);
           myservo.write(RIGHT);
           servoMoveTime = now;
