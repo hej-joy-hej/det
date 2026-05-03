@@ -146,13 +146,40 @@ void golSet(uint8_t g[][GOL_BPR], int r, int c, bool v) {
   else   g[r][c >> 3] &= ~mask;
 }
 
-void golSeed(float displayVal) {
+uint8_t golLastMode = MODE_IDLE;
+
+// Pulsar — period-3 oscillator used for idle state (13×13, centered in grid)
+const uint8_t PROGMEM PULSAR_R[48] = {
+   0, 0, 0, 0, 0, 0,  2, 2, 2, 2,  3, 3, 3, 3,  4, 4, 4, 4,  5, 5, 5, 5, 5, 5,
+   7, 7, 7, 7, 7, 7,  8, 8, 8, 8,  9, 9, 9, 9, 10,10,10,10, 12,12,12,12,12,12
+};
+const uint8_t PROGMEM PULSAR_C[48] = {
+   2, 3, 4, 8, 9,10,  0, 5, 7,12,  0, 5, 7,12,  0, 5, 7,12,  2, 3, 4, 8, 9,10,
+   2, 3, 4, 8, 9,10,  0, 5, 7,12,  0, 5, 7,12,  0, 5, 7,12,  2, 3, 4, 8, 9,10
+};
+
+void golSeed(uint8_t mode) {
   memset(golCur, 0, sizeof(golCur));
-  int density = 25 + (int)(displayVal * 0.20f);
-  for (int r = 0; r < GOL_H; r++)
-    for (int c = 0; c < GOL_W; c++)
-      if (golInCircle(r, c) && random(100) < density)
-        golSet(golCur, r, c, true);
+  if (mode == MODE_FISH) {
+    // High density — "living" state, chaotic and full
+    for (int r = 0; r < GOL_H; r++)
+      for (int c = 0; c < GOL_W; c++)
+        if (golInCircle(r, c) && random(100) < 45)
+          golSet(golCur, r, c, true);
+  } else if (mode == MODE_CONVENTIONAL) {
+    // Very low density — "dead" state, mostly dies out quickly
+    for (int r = 0; r < GOL_H; r++)
+      for (int c = 0; c < GOL_W; c++)
+        if (golInCircle(r, c) && random(100) < 8)
+          golSet(golCur, r, c, true);
+  } else {
+    // Idle: pulsar oscillator — repeats every 3 generations forever
+    int r0 = GOL_H / 2 - 6;
+    int c0 = GOL_W / 2 - 6;
+    for (uint8_t i = 0; i < 48; i++)
+      golSet(golCur, r0 + pgm_read_byte(&PULSAR_R[i]),
+                     c0 + pgm_read_byte(&PULSAR_C[i]), true);
+  }
 }
 
 uint16_t golStep() {
@@ -434,7 +461,8 @@ void setup() {
   drawLabels();
 
 #if SCREEN_TYPE == 1
-  golSeed(displayValue);
+  golLastMode = activeMode;
+  golSeed(activeMode);
   drawGoL();
 #elif SCREEN_TYPE == 2
   rainInit();
@@ -465,12 +493,20 @@ void loop() {
     prevDotValue = displayValue;
 #endif
 
+    if (activeMode != golLastMode) {
+      golLastMode = activeMode;
+      golSeed(activeMode);
+    }
+
     applyColorScheme();
-    drawValue(displayValue);
+    drawValue(activeMode == MODE_IDLE ? 50.0f : displayValue);
 
     uint16_t pop = golStep();
     drawGoL();
-    if (pop < 15) golSeed(displayValue);
+    // Re-seed thresholds differ per mode: fish re-seeds readily to stay alive;
+    // conventional is allowed to nearly die before a sparse restart.
+    uint8_t reseedAt = (activeMode == MODE_FISH) ? 15 : (activeMode == MODE_CONVENTIONAL) ? 3 : 0;
+    if (pop <= reseedAt) golSeed(activeMode);
   }
 
 #elif SCREEN_TYPE == 2
@@ -486,10 +522,9 @@ void loop() {
 #endif
 
     applyColorScheme();
-    float rainTarget = (activeMode == MODE_CONVENTIONAL) ? 0.0f : displayValue;
-    if      (rainShownValue < rainTarget - 0.5f) rainShownValue += 1.5f;
-    else if (rainShownValue > rainTarget + 0.5f) rainShownValue -= 1.5f;
-    else                                          rainShownValue  = rainTarget;
+    rainShownValue = (activeMode == MODE_IDLE) ? 50.0f : displayValue;
+    if (rainShownValue < 0.0f)   rainShownValue = 0.0f;
+    if (rainShownValue > 100.0f) rainShownValue = 100.0f;
     drawValue(rainShownValue);
     rainStep();
   }
@@ -506,10 +541,11 @@ void loop() {
     prevDotValue = displayValue;
 #endif
 
+    float dispVal = (activeMode == MODE_IDLE) ? 50.0f : displayValue;
     applyColorScheme();
-    drawValue(displayValue);
+    drawValue(dispVal);
 
-    float fill = displayValue / 100.0f;
+    float fill = dispVal / 100.0f;
     if (fill < 0.0f) fill = 0.0f;
     if (fill > 1.0f) fill = 1.0f;
 
