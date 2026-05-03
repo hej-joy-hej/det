@@ -13,7 +13,7 @@
 // IMPORTANT: Unplug the wire from D0 before uploading via USB.
 //            Reconnect after upload is complete.
 
-#define SCREEN_TYPE 1   // ← change this (0 / 1 / 2) before uploading each unit
+#define SCREEN_TYPE 2   // ← change this (0 / 1 / 2) before uploading each unit
 // #define DEMO_MODE      // ← uncomment for demo mode
 
 #include <SPI.h>
@@ -325,10 +325,13 @@ void processSerial() {
       rxBuf[rxIdx++] = b;
       if (rxIdx == 7) {
         if (rxBuf[6] == 0x55) {
-          activeMode = rxBuf[1];
+          uint8_t mode = rxBuf[1];
           float val;
           memcpy(&val, &rxBuf[2], sizeof(float));
-          displayValue = val;
+          if (mode <= 2 && val >= 0.0f && val <= 100.0f) {
+            activeMode   = mode;
+            displayValue = val;
+          }
         }
         rxIdx = 0;
       }
