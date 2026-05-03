@@ -1,15 +1,18 @@
 // CO2 Halftone Display — Mega Master
-// NFC tap switches modes, servo rotates on tap, pumps toggle per mode.
 //
-// Serial1 (TX pin 18) → Uno 1
-// Serial2 (TX pin 16) → Uno 2
-// Serial3 (TX pin 14) → Uno 3
-// SoftwareSerial (TX pin 12) → Uno 4
+// Serial1 (pin 18 TX) → Uno 1 (GHG)
+// Serial2 (pin 16 TX) → Uno 2 (Biodiversity)
+// Serial3 (pin 14 TX) → Uno 3 (Water Quality)
+// SoftwareSerial (pin 12 TX) → Uno 4 (spare)
 //
 // NFC reader: I2C (SDA pin 20, SCL pin 21)
-// Servo: pin 9
+// Servo: pin 26
 // Pump A (conventional): pin 22
 // Pump B (fish): pin 24
+//
+// NOTE: pins 22/24 are not PWM-capable on the Mega.
+// For light/heavy power levels, move pumps to pins 2–13 or 44–46
+// and replace digitalWrite() with analogWrite().
 
 #include <Wire.h>
 #include <Adafruit_PN532.h>
@@ -18,33 +21,49 @@
 
 SoftwareSerial Serial4(-1, 12);
 
-// ---------- Modes (must match slave) ----------
 #define MODE_IDLE         0
 #define MODE_CONVENTIONAL 1
 #define MODE_FISH         2
 
-// ---------- NFC ----------
-#define PN532_IRQ   -1
-#define PN532_RESET -1
-Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET, &Wire);
+// ---- Per-metric animation targets (0–100) ----
+// Adjust idleVal, convVal, fishVal independently per metric.
+// idleVal is the centre of the idle fluctuation range (walk stays within ±10 of it).
+struct MetricConfig {
+  float idleVal;
+  float convVal;
+  float fishVal;
+};
 
-const uint8_t UID_A[] = {0x04, 0x2B, 0x9C, 0xAA, 0x96, 0x20, 0x91};
-const uint8_t UID_B[] = {0x04, 0x2B, 0x9D, 0xAA, 0x96, 0x20, 0x91};
+const MetricConfig GHG   = { 50.0f, 100.0f,   0.0f };
+const MetricConfig BIO   = { 50.0f,   0.0f, 100.0f };
+const MetricConfig WATER = { 50.0f,   0.0f, 100.0f };
+
+// ---- NFC ----
+Adafruit_PN532 nfc(-1, -1, &Wire);
+
 const uint8_t UID_LEN = 7;
 
-// ---------- Servo ----------
+const uint8_t CONV_UIDS[][7] = {
+  {0x04, 0x2B, 0x9F, 0xAA, 0x96, 0x20, 0x91},
+  {0x04, 0x2B, 0xA1, 0xAA, 0x96, 0x20, 0x91},
+};
+const uint8_t FISH_UIDS[][7] = {
+  {0x04, 0x2B, 0xA2, 0xAA, 0x96, 0x20, 0x91},
+  {0x04, 0x2B, 0xA0, 0xAA, 0x96, 0x20, 0x91},
+};
+#define CONV_COUNT 2
+#define FISH_COUNT 2
+
+// ---- Servo ----
 Servo myservo;
-#define SERVO_PIN   26
-#define ORIGIN      90
-#define LEFT        30
-#define RIGHT       150
+#define SERVO_PIN  26
+#define ORIGIN     90
+#define LEFT       30
+#define RIGHT      150
 
-unsigned long servoMoveTime = 0;
-bool servoReturning = false;
-
-// ---------- Pumps ----------
-#define PUMP_A_PIN  22   // conventional pump
-#define PUMP_B_PIN  24   // fish pump
+// ---- Pumps ----
+#define PUMP_A_PIN  22
+#define PUMP_B_PIN  24
 
 void setPumps(uint8_t mode) {
   if (mode == MODE_CONVENTIONAL) {
@@ -59,15 +78,48 @@ void setPumps(uint8_t mode) {
   }
 }
 
-uint8_t currentMode = MODE_IDLE;
+// ---- Idle random walk (one per metric, stays within idleVal ± 10) ----
+// Index: 0=GHG, 1=BIO, 2=WATER — matches Serial1/2/3 order
+float idleWalk[3] = {50.0f, 50.0f, 50.0f};
+float idleVel[3]  = {0.0f,  0.0f,  0.0f};
+
+void updateIdleWalks(const MetricConfig configs[]) {
+  for (int i = 0; i < 3; i++) {
+    float centre = configs[i].idleVal;
+    idleVel[i] += ((float)random(-100, 101) / 100.0f) * 0.05f;
+    idleVel[i] *= 0.95f;
+    idleVel[i] += (centre - idleWalk[i]) * 0.003f;  // gentle pull to centre
+    idleWalk[i] += idleVel[i];
+    if (idleWalk[i] > centre + 10.0f) { idleWalk[i] = centre + 10.0f; idleVel[i] = -fabs(idleVel[i]); }
+    if (idleWalk[i] < centre - 10.0f) { idleWalk[i] = centre - 10.0f; idleVel[i] =  fabs(idleVel[i]); }
+  }
+}
+
+// Value at the moment a mode started, used as the animation start point
+float modeStartVal[3] = {50.0f, 50.0f, 50.0f};
+
+// ---- State ----
+uint8_t currentMode   = MODE_IDLE;
 unsigned long modeStartTime = 0;
-#define MODE_DURATION 10000  // 10 seconds
+bool servoFired       = false;
 
-// ---------- NFC cooldown ----------
-unsigned long lastTapTime = 0;
-#define TAP_COOLDOWN 10000
+#define MODE_DURATION  10000UL
 
-// ---------- Serial packet ----------
+unsigned long lastTapTime  = 0;
+#define TAP_COOLDOWN   2000UL
+
+unsigned long lastSendTime = 0;
+
+// ---- Animation ----
+float animatedVal(const MetricConfig &cfg, int idx) {
+  if (currentMode == MODE_IDLE) return idleWalk[idx];
+  float target = (currentMode == MODE_CONVENTIONAL) ? cfg.convVal : cfg.fishVal;
+  float t = (float)(millis() - modeStartTime) / (float)MODE_DURATION;
+  if (t > 1.0f) t = 1.0f;
+  return modeStartVal[idx] + (target - modeStartVal[idx]) * t;
+}
+
+// ---- Serial packet ----
 void sendValue(Stream &port, uint8_t mode, float val) {
   port.write(0xAA);
   port.write(mode);
@@ -75,33 +127,21 @@ void sendValue(Stream &port, uint8_t mode, float val) {
   port.write(0x55);
 }
 
-// ---------- Fake sensor data (replace with real sensors) ----------
-float co2_value = 15.0;
-float co2_velocity = 0.0;
-
-unsigned long lastSendTime = 0;
-
-void updateFakeCO2() {
-  co2_value += co2_velocity;
-  co2_velocity += ((float)random(-100, 101) / 100.0f) * 0.06f;
-  co2_velocity *= 0.95f;
-  co2_velocity += (15.0f - co2_value) * 0.002f;
-  if (random(0, 100) < 3)
-    co2_velocity += ((float)random(-100, 101) / 100.0f) * 0.4f;
-  if (co2_value >= 20.0f) { co2_value = 20.0f; co2_velocity = -fabs(co2_velocity); }
-  if (co2_value <= 10.0f) { co2_value = 10.0f; co2_velocity = fabs(co2_velocity); }
-}
-
-// ---------- UID matching ----------
+// ---- UID matching ----
 bool matchUID(uint8_t *uid, uint8_t len, const uint8_t *target) {
   if (len != UID_LEN) return false;
-  for (uint8_t i = 0; i < UID_LEN; i++) {
+  for (uint8_t i = 0; i < UID_LEN; i++)
     if (uid[i] != target[i]) return false;
-  }
   return true;
 }
 
-// ---------- Setup ----------
+bool matchAnyUID(uint8_t *uid, uint8_t len, const uint8_t uids[][7], uint8_t count) {
+  for (uint8_t i = 0; i < count; i++)
+    if (matchUID(uid, len, uids[i])) return true;
+  return false;
+}
+
+// ---- Setup ----
 void setup() {
   Serial.begin(9600);
   Serial1.begin(9600);
@@ -111,104 +151,91 @@ void setup() {
 
   randomSeed(analogRead(5));
 
-  // Pumps
   pinMode(PUMP_A_PIN, OUTPUT);
   pinMode(PUMP_B_PIN, OUTPUT);
   setPumps(MODE_IDLE);
 
-  // NFC
   nfc.begin();
   delay(1000);
-  uint32_t versiondata = nfc.getFirmwareVersion();
-
-  if (!versiondata) {
-    Serial.println("Didn't find PN532");
+  if (!nfc.getFirmwareVersion()) {
+    Serial.println("PN532 not found");
     while (1);
   }
   nfc.SAMConfig();
-  Serial.println("Mega master started — waiting for NFC tap");
-  Serial.println("MODE:IDLE");
+  Serial.println("Mega ready — waiting for NFC tap");
 }
 
-// ---------- Main loop ----------
+// ---- Main loop ----
 void loop() {
   unsigned long now = millis();
-  
 
-  // --- Non-blocking servo return ---
-  if (servoReturning && now - servoMoveTime >= 1500) {
+  // Mode timeout: servo fires at the END of the 10s animation, then back to idle.
+  // Blocking delays are intentional — displays freeze at final values during
+  // the ~2s servo movement, then snap to idle values.
+  if (currentMode != MODE_IDLE && now - modeStartTime >= MODE_DURATION && !servoFired) {
+    servoFired = true;
+    myservo.attach(SERVO_PIN);
+    myservo.write(currentMode == MODE_CONVENTIONAL ? LEFT : RIGHT);
+    delay(1500);
     myservo.write(ORIGIN);
     delay(500);
     myservo.detach();
-    servoReturning = false;
-  }
 
-  // --- Mode timeout → back to idle ---
-  if (currentMode != MODE_IDLE && now - modeStartTime >= MODE_DURATION) {
+    // Reset idle walks to centre so they drift back naturally from 50
+    for (int i = 0; i < 3; i++) {
+      idleWalk[i] = 50.0f;
+      idleVel[i]  = 0.0f;
+    }
+
     currentMode = MODE_IDLE;
     setPumps(MODE_IDLE);
-    Serial.println("Timeout — back to idle");
-    Serial.println("MODE:IDLE");
+    lastTapTime = millis();  // prevent NFC immediately re-triggering if card is still nearby
+    Serial.println("Mode ended — back to idle");
   }
 
-  // --- NFC read with cooldown ---
-  if (now - lastTapTime >= TAP_COOLDOWN) {
-    //Serial.println("NFC: SAMConfig...");
+  // NFC read — only poll in idle so an active animation can't be interrupted
+  if (currentMode == MODE_IDLE && now - lastTapTime >= TAP_COOLDOWN) {
     nfc.SAMConfig();
-    //Serial.println("NFC: reading...");
-    uint8_t uid[7];
-    uint8_t uidLength;
-    if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 500)) {
+    uint8_t uid[7], uidLen;
+    if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLen, 500)) {
       lastTapTime = now;
-      if (matchUID(uid, uidLength, UID_A)) {
-        Serial.print("Card A detected at ");
-        Serial.println(now);
-        if (currentMode != MODE_CONVENTIONAL) {
-          Serial.println("Card A — Conventional — Left");
-          currentMode = MODE_CONVENTIONAL;
-          modeStartTime = now;
-          setPumps(MODE_CONVENTIONAL);
-          Serial.println("MODE:CONVENTIONAL");
-          myservo.attach(SERVO_PIN);
-          myservo.write(LEFT);
-          servoMoveTime = now;
-          servoReturning = true;
-        }
-      } else if (matchUID(uid, uidLength, UID_B)) {
-        Serial.print("Card B detected at ");
-        Serial.println(now);
-        if (currentMode != MODE_FISH) {
-          Serial.println("Card B — Fish — Right");
-          currentMode = MODE_FISH;
-          modeStartTime = now;
-          setPumps(MODE_FISH);
-          Serial.println("MODE:FISH");
-          myservo.attach(SERVO_PIN);
-          myservo.write(RIGHT);
-          servoMoveTime = now;
-          servoReturning = true;
-        }
+      if (matchAnyUID(uid, uidLen, CONV_UIDS, CONV_COUNT)) {
+        Serial.println("Conventional card — Conventional mode");
+        // Capture current idle positions as animation start points
+        for (int i = 0; i < 3; i++) modeStartVal[i] = idleWalk[i];
+        currentMode   = MODE_CONVENTIONAL;
+        modeStartTime = millis();
+        servoFired    = false;
+        setPumps(MODE_CONVENTIONAL);
+      } else if (matchAnyUID(uid, uidLen, FISH_UIDS, FISH_COUNT)) {
+        Serial.println("Fish card — Fish mode");
+        for (int i = 0; i < 3; i++) modeStartVal[i] = idleWalk[i];
+        currentMode   = MODE_FISH;
+        modeStartTime = millis();
+        servoFired    = false;
+        setPumps(MODE_FISH);
       } else {
-        Serial.println("Unknown card");
-        for (uint8_t i = 0; i < uidLength; i++) {
+        Serial.print("Unknown card: ");
+        for (uint8_t i = 0; i < uidLen; i++) {
           if (uid[i] < 0x10) Serial.print("0");
           Serial.print(uid[i], HEX);
-          if (i < uidLength - 1) Serial.print(":");
+          if (i < uidLen - 1) Serial.print(":");
         }
         Serial.println();
       }
     }
   }
 
-  // --- Send to all screens ---
+  // Broadcast different animated values to each screen every 50ms
   if (now - lastSendTime >= 50) {
     lastSendTime = now;
 
-    updateFakeCO2();
+    const MetricConfig configs[3] = {GHG, BIO, WATER};
+    if (currentMode == MODE_IDLE) updateIdleWalks(configs);
 
-    sendValue(Serial1, currentMode, co2_value);
-    sendValue(Serial2, currentMode, co2_value);
-    sendValue(Serial3, currentMode, co2_value);
-    sendValue(Serial4, currentMode, co2_value);
+    sendValue(Serial1, currentMode, animatedVal(GHG,   0));
+    sendValue(Serial2, currentMode, animatedVal(BIO,   1));
+    sendValue(Serial3, currentMode, animatedVal(WATER, 2));
+    sendValue(Serial4, currentMode, animatedVal(GHG,   0));  // spare — same as GHG
   }
 }
