@@ -5,6 +5,10 @@
 //   1 = Biodiversity   → connect to Mega Serial2 (Mega pin 16 TX → Uno pin 0 RX)
 //   2 = Water Quality  → connect to Mega Serial3 (Mega pin 14 TX → Uno pin 0 RX)
 //
+// ONE_SCREEN_MODE: all three screen types on one Uno.
+//   Each NFC tap (idle→active transition) advances to the next screen type.
+//   During idle, cycles through all three screen types every 5 seconds.
+//
 // Color scheme:
 //   Idle mode          → dark grey dots on light grey background
 //   Active, increasing → black dots on white background
@@ -14,7 +18,8 @@
 //            Reconnect after upload is complete.
 
 #define SCREEN_TYPE 2   // ← change this (0 / 1 / 2) before uploading each unit
-// #define DEMO_MODE      // ← uncomment for demo mode
+// #define DEMO_MODE        // ← uncomment for demo mode
+#define ONE_SCREEN_MODE  // ← uncomment to cycle all three screens on one Uno
 
 #include <SPI.h>
 #include <Adafruit_GFX.h>
@@ -23,12 +28,12 @@
 MCUFRIEND_kbv tft;
 
 // ---- Colors ----
-#define BLACK      0x0000
-#define WHITE      0xFFFF
-#define DARK_GREY  0x4208   // dot + label color in idle / label on white bg
-#define LIGHT_GREY    0x8410   // background in idle (~RGB 128,128,128)
-#define WATER_IDLE_BG 0x7BEF   // water quality idle bg — true 50% grey (R15 G31 B15)
-#define MED_GREY   0x9CD3   // label color on black background
+#define BLACK         0x0000
+#define WHITE         0xFFFF
+#define DARK_GREY     0x4208
+#define LIGHT_GREY    0x8410
+#define WATER_IDLE_BG 0x7BEF
+#define MED_GREY      0x9CD3
 
 // ---- Modes (must match master) ----
 #define MODE_IDLE         0
@@ -42,7 +47,7 @@ MCUFRIEND_kbv tft;
 #define GRID       3
 #define DOT_SIZE   2
 
-// ---- Grid coordinates (used by rain and halftone) ----
+// ---- Grid coordinates ----
 #define GX_START (CX - MAX_RADIUS)
 #define GY_START (CY - MAX_RADIUS)
 #define COLS     ((2 * MAX_RADIUS) / GRID + 1)
@@ -57,23 +62,33 @@ struct ScreenConfig {
 };
 
 const ScreenConfig SCREENS[] = {
-  {"Greenhouse", "Gases",     "%", 0},   // 0 = GHG
-  {"Biodiversity", "",         "%", 0},   // 1 = Biodiversity
-  {"Water",      "Quality",   "%", 0},   // 2 = Water Quality
+  {"Greenhouse", "Gases",   "%", 0},   // 0 = GHG
+  {"Biodiversity", "",       "%", 0},   // 1 = Biodiversity
+  {"Water",     "Quality",  "%", 0},   // 2 = Water Quality
 };
 
-// ---- State ----
+// ---- Global state ----
 float    displayValue  = 50.0f;
 float    prevDotValue  = 50.0f;
 uint8_t  activeMode    = MODE_IDLE;
 bool     isIncreasing  = true;
 
-uint16_t COLOR_DOT   = DARK_GREY;
-uint16_t COLOR_BG    = LIGHT_GREY;
-uint16_t COLOR_LABEL = DARK_GREY;
+uint16_t COLOR_DOT   = WHITE;
+uint16_t COLOR_BG    = BLACK;
+uint16_t COLOR_LABEL = WHITE;
 
 char          prevValueStr[16] = "";
 unsigned long lastFrameTime    = 0;
+
+// ---- ONE_SCREEN_MODE runtime screen selection ----
+#ifdef ONE_SCREEN_MODE
+uint8_t       currentScreenType = 0;
+uint8_t       prevActiveMode    = MODE_IDLE;
+unsigned long lastIdleCycleTime = 0;
+#define ACTIVE_SCREEN_TYPE currentScreenType
+#else
+#define ACTIVE_SCREEN_TYPE SCREEN_TYPE
+#endif
 
 // ---- Serial receive ----
 uint8_t rxBuf[7];
@@ -107,26 +122,88 @@ void demoTick(unsigned long now) {
     activeMode   = s.mode;
     displayValue = (float)s.value;
     isIncreasing = s.increasing;
-    prevDotValue = displayValue;   // suppress direction-detection flip
-    prevValueStr[0] = '\0';        // force value redraw
+    prevDotValue = displayValue;
+    prevValueStr[0] = '\0';
   }
 }
 #endif
 
 // ============================================================
-// Conway's Game of Life — Biodiversity screen (SCREEN_TYPE 1)
+// Animation constants — #defines cost no RAM; always declared
 // ============================================================
+
+// Game of Life
+#define GOL_CELL 6
+#define GOL_W    37
+#define GOL_H    37
+#define GOL_BPR  ((GOL_W + 7) / 8)
+#define GOL_X0   (CX - (GOL_W * GOL_CELL) / 2)
+#define GOL_Y0   (CY - (GOL_H * GOL_CELL) / 2)
+
+// Rain
+#define RAIN_N    35
+#define TRAIL_LEN  5
+
+struct Drop {
+  uint8_t cols[TRAIL_LEN];
+  uint8_t rows[TRAIL_LEN];
+  uint8_t head;
+  uint8_t speed;
+};
+
+// Halftone
+#define BIT_COLS ((COLS + 7) / 8)
+
+// ============================================================
+// Animation buffers
+//
+// ONE_SCREEN_MODE: union so all three share the same memory
+//   (~750 bytes max vs ~1540 bytes if allocated separately).
+//   Only one animation runs at a time so the overlap is safe.
+// Otherwise: only the buffer for the compile-time SCREEN_TYPE.
+// ============================================================
+
+#ifdef ONE_SCREEN_MODE
+
+union {
+  struct { uint8_t cur[GOL_H][GOL_BPR]; uint8_t nxt[GOL_H][GOL_BPR]; } gol;
+  Drop rain[RAIN_N];
+  uint8_t halftone[ROWS][BIT_COLS];
+} animBuf;
+
+#define golCur    animBuf.gol.cur
+#define golNxt    animBuf.gol.nxt
+#define rainDrops animBuf.rain
+#define dotState  animBuf.halftone
+
+#else
+
 #if SCREEN_TYPE == 1
+uint8_t golCur[GOL_H][GOL_BPR];
+uint8_t golNxt[GOL_H][GOL_BPR];
+#elif SCREEN_TYPE == 2
+Drop rainDrops[RAIN_N];
+#else
+uint8_t dotState[ROWS][BIT_COLS];
+#endif
 
-#define GOL_CELL  6                        // pixels per cell (5×5 drawn + 1px gap)
-#define GOL_W     37                       // cells across
-#define GOL_H     37                       // cells tall
-#define GOL_BPR   ((GOL_W + 7) / 8)       // bytes per row = 5
-#define GOL_X0    (CX - (GOL_W * GOL_CELL) / 2)   // = 9
-#define GOL_Y0    (CY - (GOL_H * GOL_CELL) / 2)   // = 14
+#endif  // ONE_SCREEN_MODE
 
-uint8_t golCur[GOL_H][GOL_BPR];   // 185 bytes — current generation
-uint8_t golNxt[GOL_H][GOL_BPR];   // 185 bytes — next generation
+// ============================================================
+// Conway's Game of Life — Biodiversity (screen type 1)
+// ============================================================
+#if defined(ONE_SCREEN_MODE) || SCREEN_TYPE == 1
+
+uint8_t golLastMode = MODE_IDLE;
+
+const uint8_t PROGMEM PULSAR_R[48] = {
+   0, 0, 0, 0, 0, 0,  2, 2, 2, 2,  3, 3, 3, 3,  4, 4, 4, 4,  5, 5, 5, 5, 5, 5,
+   7, 7, 7, 7, 7, 7,  8, 8, 8, 8,  9, 9, 9, 9, 10,10,10,10, 12,12,12,12,12,12
+};
+const uint8_t PROGMEM PULSAR_C[48] = {
+   2, 3, 4, 8, 9,10,  0, 5, 7,12,  0, 5, 7,12,  0, 5, 7,12,  2, 3, 4, 8, 9,10,
+   2, 3, 4, 8, 9,10,  0, 5, 7,12,  0, 5, 7,12,  0, 5, 7,12,  2, 3, 4, 8, 9,10
+};
 
 bool golInCircle(int r, int c) {
   int px = GOL_X0 + c * GOL_CELL + GOL_CELL / 2;
@@ -146,34 +223,19 @@ void golSet(uint8_t g[][GOL_BPR], int r, int c, bool v) {
   else   g[r][c >> 3] &= ~mask;
 }
 
-uint8_t golLastMode = MODE_IDLE;
-
-// Pulsar — period-3 oscillator used for idle state (13×13, centered in grid)
-const uint8_t PROGMEM PULSAR_R[48] = {
-   0, 0, 0, 0, 0, 0,  2, 2, 2, 2,  3, 3, 3, 3,  4, 4, 4, 4,  5, 5, 5, 5, 5, 5,
-   7, 7, 7, 7, 7, 7,  8, 8, 8, 8,  9, 9, 9, 9, 10,10,10,10, 12,12,12,12,12,12
-};
-const uint8_t PROGMEM PULSAR_C[48] = {
-   2, 3, 4, 8, 9,10,  0, 5, 7,12,  0, 5, 7,12,  0, 5, 7,12,  2, 3, 4, 8, 9,10,
-   2, 3, 4, 8, 9,10,  0, 5, 7,12,  0, 5, 7,12,  0, 5, 7,12,  2, 3, 4, 8, 9,10
-};
-
 void golSeed(uint8_t mode) {
   memset(golCur, 0, sizeof(golCur));
   if (mode == MODE_FISH) {
-    // High density — "living" state, chaotic and full
     for (int r = 0; r < GOL_H; r++)
       for (int c = 0; c < GOL_W; c++)
         if (golInCircle(r, c) && random(100) < 45)
           golSet(golCur, r, c, true);
   } else if (mode == MODE_CONVENTIONAL) {
-    // Very low density — "dead" state, mostly dies out quickly
     for (int r = 0; r < GOL_H; r++)
       for (int c = 0; c < GOL_W; c++)
         if (golInCircle(r, c) && random(100) < 8)
           golSet(golCur, r, c, true);
   } else {
-    // Idle: pulsar oscillator — repeats every 3 generations forever
     int r0 = GOL_H / 2 - 6;
     int c0 = GOL_W / 2 - 6;
     for (uint8_t i = 0; i < 48; i++)
@@ -212,35 +274,22 @@ void drawGoL() {
   }
 }
 
+#endif  // GoL
+
 // ============================================================
-// Falling rain — Water Quality screen (SCREEN_TYPE 2)
+// Falling rain — Water Quality (screen type 2)
 // ============================================================
-#elif SCREEN_TYPE == 2
+#if defined(ONE_SCREEN_MODE) || SCREEN_TYPE == 2
 
-#define RAIN_N     35   // maximum simultaneous drops
-#define TRAIL_LEN   5   // cells per streak (ring buffer)
-
-// Each drop is a ring buffer of TRAIL_LEN positions.
-// head = index of the newest (front) cell.
-// (head+1)%TRAIL_LEN = oldest (tail) cell — erased each step.
-struct Drop {
-  uint8_t cols[TRAIL_LEN];
-  uint8_t rows[TRAIL_LEN];
-  uint8_t head;
-  uint8_t speed;  // rows per step (2 or 3)
-};
-
-Drop    rainDrops[RAIN_N];
-uint8_t rainActiveN   = RAIN_N;
+uint8_t rainActiveN    = RAIN_N;
 float   rainShownValue = 50.0f;
 
 uint8_t rainCountForMode() {
   if (activeMode == MODE_CONVENTIONAL) return 5;
   if (activeMode == MODE_FISH)         return 35;
-  return 18;  // idle — average
+  return 18;
 }
 
-// Erase all trail cells then park the drop at a new start position.
 void rainReset(uint8_t i, bool stagger) {
   long maxRSq = (long)MAX_RADIUS * MAX_RADIUS;
   for (uint8_t t = 0; t < TRAIL_LEN; t++) {
@@ -257,7 +306,7 @@ void rainReset(uint8_t i, bool stagger) {
     rainDrops[i].rows[t] = sr;
   }
   rainDrops[i].head  = 0;
-  rainDrops[i].speed = random(2, 4);  // 2 or 3 rows per step
+  rainDrops[i].speed = random(2, 4);
 }
 
 void rainInit() {
@@ -267,8 +316,6 @@ void rainInit() {
 
 void rainStep() {
   long maxRSq = (long)MAX_RADIUS * MAX_RADIUS;
-
-  // Adjust active count
   uint8_t target = rainCountForMode();
   if (target < rainActiveN)
     for (uint8_t i = target; i < rainActiveN; i++)
@@ -280,16 +327,14 @@ void rainStep() {
 
   for (uint8_t i = 0; i < rainActiveN; i++) {
     uint8_t oh = rainDrops[i].head;
-    uint8_t nh = (oh + 1) % TRAIL_LEN;  // new head = old tail slot
+    uint8_t nh = (oh + 1) % TRAIL_LEN;
 
-    // Erase the tail (oldest cell, about to be reused)
     int px = GX_START + rainDrops[i].cols[nh] * GRID;
     int py = GY_START + rainDrops[i].rows[nh] * GRID;
     int dx = px - CX, dy = py - CY;
     if ((long)dx*dx + (long)dy*dy <= maxRSq)
       tft.fillRect(px, py, DOT_SIZE, DOT_SIZE, COLOR_BG);
 
-    // Advance diagonally: +1 col right, +speed rows down
     uint8_t nc = rainDrops[i].cols[oh] + 1;
     uint8_t nr = rainDrops[i].rows[oh] + rainDrops[i].speed;
 
@@ -299,7 +344,6 @@ void rainStep() {
     rainDrops[i].rows[nh] = nr;
     rainDrops[i].head = nh;
 
-    // Draw new head
     px = GX_START + nc * GRID;
     py = GY_START + nr * GRID;
     dx = px - CX; dy = py - CY;
@@ -308,13 +352,12 @@ void rainStep() {
   }
 }
 
-// ============================================================
-// Halftone grid — GHG screen (SCREEN_TYPE 0)
-// ============================================================
-#else
+#endif  // Rain
 
-#define BIT_COLS ((COLS + 7) / 8)
-uint8_t dotState[ROWS][BIT_COLS];
+// ============================================================
+// Halftone grid — GHG (screen type 0)
+// ============================================================
+#if defined(ONE_SCREEN_MODE) || SCREEN_TYPE == 0
 
 const uint8_t PROGMEM BAYER[8][8] = {
   { 0, 32,  8, 40,  2, 34, 10, 42},
@@ -341,8 +384,11 @@ void setDot(uint8_t row, uint8_t col, int px, int py, bool on) {
   setBit(row, col, on);
 }
 
-#endif  // SCREEN_TYPE
+#endif  // Halftone
 
+// ============================================================
+// Serial
+// ============================================================
 void processSerial() {
   while (Serial.available()) {
     uint8_t b = Serial.read();
@@ -368,7 +414,7 @@ void processSerial() {
 
 // ---- Draw labels ----
 void drawLabels() {
-  const ScreenConfig &cfg = SCREENS[SCREEN_TYPE];
+  const ScreenConfig &cfg = SCREENS[ACTIVE_SCREEN_TYPE];
   tft.fillRect(0, 250, 240, 70, COLOR_BG);
   tft.setTextColor(COLOR_LABEL, COLOR_BG);
   tft.setTextSize(2);
@@ -385,7 +431,7 @@ void drawLabels() {
 
 // ---- Draw numeric value ----
 void drawValue(float val) {
-  const ScreenConfig &cfg = SCREENS[SCREEN_TYPE];
+  const ScreenConfig &cfg = SCREENS[ACTIVE_SCREEN_TYPE];
   char str[16];
   dtostrf(val, 1, cfg.decimals, str);
   strcat(str, cfg.unit);
@@ -413,42 +459,200 @@ void drawValue(float val) {
 
 // ---- Color scheme ----
 void applyColorScheme() {
-  uint16_t newDot, newBg, newLabel;
+  if (COLOR_DOT == WHITE && COLOR_BG == BLACK) return;
 
-  if (activeMode == MODE_IDLE) {
-#if SCREEN_TYPE == 2
-    newDot   = DARK_GREY;
-    newBg    = WATER_IDLE_BG;
-    newLabel = BLACK;
-#else
-    newDot   = DARK_GREY;
-    newBg    = LIGHT_GREY;
-    newLabel = DARK_GREY;
-#endif
-  } else if (isIncreasing) {
-    newDot   = BLACK;
-    newBg    = LIGHT_GREY;
-    newLabel = BLACK;
-  } else {
-    newDot   = WHITE;
-    newBg    = BLACK;
-    newLabel = WHITE;
-  }
-
-  if (newDot == COLOR_DOT && newBg == COLOR_BG) return;
-
-  COLOR_DOT   = newDot;
-  COLOR_BG    = newBg;
-  COLOR_LABEL = newLabel;
+  COLOR_DOT   = WHITE;
+  COLOR_BG    = BLACK;
+  COLOR_LABEL = WHITE;
   tft.fillScreen(COLOR_BG);
   drawLabels();
-#if SCREEN_TYPE == 0
+#if defined(ONE_SCREEN_MODE)
+  if (ACTIVE_SCREEN_TYPE == 0) memset(dotState, 0, sizeof(dotState));
+#elif SCREEN_TYPE == 0
   memset(dotState, 0, sizeof(dotState));
 #endif
   prevValueStr[0] = '\0';
 }
 
-// ---- Setup ----
+// ============================================================
+// Per-screen frame functions (called each loop iteration)
+// ============================================================
+
+#if defined(ONE_SCREEN_MODE) || SCREEN_TYPE == 1
+void golFrame(unsigned long now) {
+  if (now - lastFrameTime < 200) return;
+  lastFrameTime = now;
+
+#ifndef DEMO_MODE
+  float delta = displayValue - prevDotValue;
+  if      (delta >  0.1f) isIncreasing = true;
+  else if (delta < -0.1f) isIncreasing = false;
+  prevDotValue = displayValue;
+#endif
+
+  if (activeMode != golLastMode) {
+    golLastMode = activeMode;
+    golSeed(activeMode);
+  }
+
+  applyColorScheme();
+  drawValue(activeMode == MODE_IDLE ? 50.0f : displayValue);
+
+  uint16_t pop = golStep();
+  drawGoL();
+  uint8_t reseedAt = (activeMode == MODE_FISH) ? 15 : (activeMode == MODE_CONVENTIONAL) ? 3 : 0;
+  if (pop <= reseedAt) golSeed(activeMode);
+}
+#endif
+
+#if defined(ONE_SCREEN_MODE) || SCREEN_TYPE == 2
+void rainFrame(unsigned long now) {
+  if (now - lastFrameTime < 35) return;
+  lastFrameTime = now;
+
+#ifndef DEMO_MODE
+  float delta = displayValue - prevDotValue;
+  if      (delta >  0.1f) isIncreasing = true;
+  else if (delta < -0.1f) isIncreasing = false;
+  prevDotValue = displayValue;
+#endif
+
+  applyColorScheme();
+  rainShownValue = (activeMode == MODE_IDLE) ? 50.0f : displayValue;
+  if (rainShownValue < 0.0f)   rainShownValue = 0.0f;
+  if (rainShownValue > 100.0f) rainShownValue = 100.0f;
+  drawValue(rainShownValue);
+  rainStep();
+}
+#endif
+
+#if defined(ONE_SCREEN_MODE) || SCREEN_TYPE == 0
+void halftoneFrame(unsigned long now) {
+  if (now - lastFrameTime < 50) return;
+  lastFrameTime = now;
+
+#ifndef DEMO_MODE
+  float delta = displayValue - prevDotValue;
+  if      (delta >  0.1f) isIncreasing = true;
+  else if (delta < -0.1f) isIncreasing = false;
+  prevDotValue = displayValue;
+#endif
+
+  float dispVal = (activeMode == MODE_IDLE) ? 50.0f : displayValue;
+  applyColorScheme();
+  drawValue(dispVal);
+
+  float fill = dispVal / 100.0f;
+  if (fill < 0.0f) fill = 0.0f;
+  if (fill > 1.0f) fill = 1.0f;
+
+  float fadeZone  = fill * 0.45f;
+  float solidEdge = fill - fadeZone;
+  float solidR    = solidEdge * MAX_RADIUS;
+  float fillR     = fill * MAX_RADIUS;
+  long  solidRSq  = (long)(solidR * solidR);
+  long  fillRSq   = (long)(fillR * fillR);
+  long  maxRSq    = (long)MAX_RADIUS * MAX_RADIUS;
+  float invFadeR  = 1.0f / max(fillR - solidR, 0.001f);
+
+  for (uint8_t row = 0; row < ROWS; row++) {
+    int  py   = GY_START + (int)row * GRID;
+    int  dy   = py - CY;
+    long dySq = (long)dy * dy;
+
+    for (uint8_t col = 0; col < COLS; col++) {
+      int  px     = GX_START + (int)col * GRID;
+      int  dx     = px - CX;
+      long distSq = (long)dx * dx + dySq;
+      if (distSq > maxRSq) continue;
+
+      bool target;
+      if (distSq <= solidRSq) {
+        target = true;
+      } else if (distSq >= fillRSq) {
+        target = false;
+      } else {
+        float   dist  = sqrt((float)distSq);
+        float   t     = (dist - solidR) * invFadeR;
+        uint8_t bayer = pgm_read_byte(&BAYER[row & 7][col & 7]);
+        target = bayer >= (uint8_t)(t * 64.0f);
+      }
+
+      setDot(row, col, px, py, target);
+    }
+  }
+
+  for (uint8_t t = 0; t < 30; t++) {
+    uint8_t row = random(0, ROWS);
+    uint8_t col = random(0, COLS);
+    int px = GX_START + (int)col * GRID;
+    int py = GY_START + (int)row * GRID;
+    int dx = px - CX;
+    int dy = py - CY;
+    long distSq = (long)dx * dx + (long)dy * dy;
+    if (distSq > maxRSq) continue;
+
+    float dist         = sqrt((float)distSq);
+    float norm         = dist / (float)MAX_RADIUS;
+    float distFromEdge = fabs(norm - fill);
+
+    bool doTwinkle = false;
+    if (distFromEdge < 0.1f)
+      doTwinkle = (random(0, 4) == 0);
+    else if (norm < solidEdge)
+      doTwinkle = (random(0, 6) == 0);
+    else if (norm > fill) {
+      int chance = (int)(fill * fill * 20.0f);
+      doTwinkle = (random(0, 100) < chance);
+    }
+
+    if (doTwinkle) {
+      bool cur = getBit(row, col);
+      tft.fillRect(px, py, DOT_SIZE, DOT_SIZE, cur ? COLOR_BG : COLOR_DOT);
+      setBit(row, col, !cur);
+    }
+  }
+}
+#endif
+
+// ============================================================
+// ONE_SCREEN_MODE: switch to a new screen type cleanly
+// Invalidates cached colors so applyColorScheme fires a full
+// redraw on the first frame, then reinitializes animation state.
+// ============================================================
+#ifdef ONE_SCREEN_MODE
+void initScreenType(uint8_t st) {
+  COLOR_DOT = 0x0001;   // force applyColorScheme to redraw next frame
+  COLOR_BG  = 0x0002;
+  prevValueStr[0] = '\0';
+  lastFrameTime = millis();
+
+  if (st == 1) {
+    golLastMode = 0xFF;  // force re-seed in golFrame
+    memset(golCur, 0, sizeof(golCur));
+  } else if (st == 2) {
+    // Park all drops at random positions without drawing;
+    // rainStep sizes rainActiveN correctly on the first call.
+    rainActiveN = 0;
+    for (uint8_t i = 0; i < RAIN_N; i++) {
+      uint8_t sc = random(0, COLS);
+      uint8_t sr = random(0, ROWS);
+      for (uint8_t t = 0; t < TRAIL_LEN; t++) {
+        rainDrops[i].cols[t] = sc;
+        rainDrops[i].rows[t] = sr;
+      }
+      rainDrops[i].head  = 0;
+      rainDrops[i].speed = random(2, 4);
+    }
+  } else {
+    memset(dotState, 0, sizeof(dotState));
+  }
+}
+#endif
+
+// ============================================================
+// Setup
+// ============================================================
 void setup() {
   Serial.begin(9600);
   randomSeed(analogRead(5));
@@ -460,6 +664,9 @@ void setup() {
   tft.fillScreen(COLOR_BG);
   drawLabels();
 
+#ifdef ONE_SCREEN_MODE
+  initScreenType(currentScreenType);
+#else
 #if SCREEN_TYPE == 1
   golLastMode = activeMode;
   golSeed(activeMode);
@@ -469,9 +676,12 @@ void setup() {
 #else
   memset(dotState, 0, sizeof(dotState));
 #endif
+#endif
 }
 
-// ---- Main loop ----
+// ============================================================
+// Main loop
+// ============================================================
 void loop() {
   unsigned long now = millis();
 
@@ -481,141 +691,39 @@ void loop() {
   processSerial();
 #endif
 
-#if SCREEN_TYPE == 1
-  // ---- Game of Life (200 ms) ----
-  if (now - lastFrameTime >= 200) {
-    lastFrameTime = now;
+#ifdef ONE_SCREEN_MODE
+  // idle→active: advance to the next screen type
+  if (prevActiveMode == MODE_IDLE && activeMode != MODE_IDLE) {
+    currentScreenType = (currentScreenType + 1) % 3;
+    initScreenType(currentScreenType);
+  }
+  // active→idle: reset idle cycle timer so cycling resumes cleanly
+  else if (prevActiveMode != MODE_IDLE && activeMode == MODE_IDLE) {
+    lastIdleCycleTime = now;
+  }
+  prevActiveMode = activeMode;
 
-#ifndef DEMO_MODE
-    float delta = displayValue - prevDotValue;
-    if      (delta >  0.1f) isIncreasing = true;
-    else if (delta < -0.1f) isIncreasing = false;
-    prevDotValue = displayValue;
-#endif
-
-    if (activeMode != golLastMode) {
-      golLastMode = activeMode;
-      golSeed(activeMode);
-    }
-
-    applyColorScheme();
-    drawValue(activeMode == MODE_IDLE ? 50.0f : displayValue);
-
-    uint16_t pop = golStep();
-    drawGoL();
-    // Re-seed thresholds differ per mode: fish re-seeds readily to stay alive;
-    // conventional is allowed to nearly die before a sparse restart.
-    uint8_t reseedAt = (activeMode == MODE_FISH) ? 15 : (activeMode == MODE_CONVENTIONAL) ? 3 : 0;
-    if (pop <= reseedAt) golSeed(activeMode);
+  // Cycle screen type every 5 s while idle
+  if (activeMode == MODE_IDLE && now - lastIdleCycleTime >= 5000UL) {
+    lastIdleCycleTime = now;
+    currentScreenType = (currentScreenType + 1) % 3;
+    initScreenType(currentScreenType);
   }
 
-#elif SCREEN_TYPE == 2
-  // ---- Rain (35 ms) ----
-  if (now - lastFrameTime >= 35) {
-    lastFrameTime = now;
-
-#ifndef DEMO_MODE
-    float delta = displayValue - prevDotValue;
-    if      (delta >  0.1f) isIncreasing = true;
-    else if (delta < -0.1f) isIncreasing = false;
-    prevDotValue = displayValue;
-#endif
-
-    applyColorScheme();
-    rainShownValue = (activeMode == MODE_IDLE) ? 50.0f : displayValue;
-    if (rainShownValue < 0.0f)   rainShownValue = 0.0f;
-    if (rainShownValue > 100.0f) rainShownValue = 100.0f;
-    drawValue(rainShownValue);
-    rainStep();
+  switch (currentScreenType) {
+    case 1:  golFrame(now);       break;
+    case 2:  rainFrame(now);      break;
+    default: halftoneFrame(now);  break;
   }
 
 #else
-  // ---- Halftone (50 ms) ----
-  if (now - lastFrameTime >= 50) {
-    lastFrameTime = now;
-
-#ifndef DEMO_MODE
-    float delta = displayValue - prevDotValue;
-    if      (delta >  0.1f) isIncreasing = true;
-    else if (delta < -0.1f) isIncreasing = false;
-    prevDotValue = displayValue;
+  // Compile-time screen type (original behavior, unchanged)
+#if SCREEN_TYPE == 1
+  golFrame(now);
+#elif SCREEN_TYPE == 2
+  rainFrame(now);
+#else
+  halftoneFrame(now);
 #endif
-
-    float dispVal = (activeMode == MODE_IDLE) ? 50.0f : displayValue;
-    applyColorScheme();
-    drawValue(dispVal);
-
-    float fill = dispVal / 100.0f;
-    if (fill < 0.0f) fill = 0.0f;
-    if (fill > 1.0f) fill = 1.0f;
-
-    float fadeZone  = fill * 0.45f;
-    float solidEdge = fill - fadeZone;
-    float solidR    = solidEdge * MAX_RADIUS;
-    float fillR     = fill * MAX_RADIUS;
-    long  solidRSq  = (long)(solidR * solidR);
-    long  fillRSq   = (long)(fillR * fillR);
-    long  maxRSq    = (long)MAX_RADIUS * MAX_RADIUS;
-    float invFadeR  = 1.0f / max(fillR - solidR, 0.001f);
-
-    for (uint8_t row = 0; row < ROWS; row++) {
-      int  py   = GY_START + (int)row * GRID;
-      int  dy   = py - CY;
-      long dySq = (long)dy * dy;
-
-      for (uint8_t col = 0; col < COLS; col++) {
-        int  px     = GX_START + (int)col * GRID;
-        int  dx     = px - CX;
-        long distSq = (long)dx * dx + dySq;
-        if (distSq > maxRSq) continue;
-
-        bool target;
-        if (distSq <= solidRSq) {
-          target = true;
-        } else if (distSq >= fillRSq) {
-          target = false;
-        } else {
-          float   dist  = sqrt((float)distSq);
-          float   t     = (dist - solidR) * invFadeR;
-          uint8_t bayer = pgm_read_byte(&BAYER[row & 7][col & 7]);
-          target = bayer >= (uint8_t)(t * 64.0f);
-        }
-
-        setDot(row, col, px, py, target);
-      }
-    }
-
-    // ---- Twinkle ----
-    for (uint8_t t = 0; t < 30; t++) {
-      uint8_t row = random(0, ROWS);
-      uint8_t col = random(0, COLS);
-      int px = GX_START + (int)col * GRID;
-      int py = GY_START + (int)row * GRID;
-      int dx = px - CX;
-      int dy = py - CY;
-      long distSq = (long)dx * dx + (long)dy * dy;
-      if (distSq > maxRSq) continue;
-
-      float dist         = sqrt((float)distSq);
-      float norm         = dist / (float)MAX_RADIUS;
-      float distFromEdge = fabs(norm - fill);
-
-      bool doTwinkle = false;
-      if (distFromEdge < 0.1f)
-        doTwinkle = (random(0, 4) == 0);
-      else if (norm < solidEdge)
-        doTwinkle = (random(0, 6) == 0);
-      else if (norm > fill) {
-        int chance = (int)(fill * fill * 20.0f);
-        doTwinkle = (random(0, 100) < chance);
-      }
-
-      if (doTwinkle) {
-        bool cur = getBit(row, col);
-        tft.fillRect(px, py, DOT_SIZE, DOT_SIZE, cur ? COLOR_BG : COLOR_DOT);
-        setBit(row, col, !cur);
-      }
-    }
-  }
 #endif
 }
