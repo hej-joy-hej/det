@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>TFT Preview</title>
+  <style>
+    body { background: #222; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+    canvas { image-rendering: pixelated; border: 2px solid #555; }
+  </style>
+</head>
+<body>
+<canvas id="tft" width="240" height="320"></canvas>
+<script>
+const canvas = document.getElementById('tft');
+const ctx = canvas.getContext('2d');
+
+// Colors matching RGB565 values in the slave code
+const DARK_GREY  = '#424242';  // 0x4208
+const LIGHT_GREY = '#848484';  // 0x8410
+const BLACK      = '#000000';
+const WHITE      = '#ffffff';
+
+// Layout (matches slave defines)
+const CX = 120, CY = 125, MAX_RADIUS = 112, GRID = 3, DOT_SIZE = 2;
+
+const BAYER = [
+  [ 0, 32,  8, 40,  2, 34, 10, 42],
+  [48, 16, 56, 24, 50, 18, 58, 26],
+  [12, 44,  4, 36, 14, 46,  6, 38],
+  [60, 28, 52, 20, 62, 30, 54, 22],
+  [ 3, 35, 11, 43,  1, 33,  9, 41],
+  [51, 19, 59, 27, 49, 17, 57, 25],
+  [15, 47,  7, 39, 13, 45,  5, 37],
+  [63, 31, 55, 23, 61, 29, 53, 21]
+];
+
+const GX_START = CX - MAX_RADIUS;
+const GY_START = CY - MAX_RADIUS;
+const COLS = Math.floor((2 * MAX_RADIUS) / GRID) + 1;
+const ROWS = Math.floor((2 * MAX_RADIUS) / GRID) + 1;
+
+function drawHalftone(fill, colorDot, colorBg) {
+  const fadeZone  = fill * 0.45;
+  const solidEdge = fill - fadeZone;
+  const solidR    = solidEdge * MAX_RADIUS;
+  const fillR     = fill * MAX_RADIUS;
+  const solidRSq  = solidR * solidR;
+  const fillRSq   = fillR * fillR;
+  const maxRSq    = MAX_RADIUS * MAX_RADIUS;
+  const invFadeR  = 1.0 / Math.max(fillR - solidR, 0.001);
+
+  for (let row = 0; row < ROWS; row++) {
+    const py  = GY_START + row * GRID;
+    const dy  = py - CY;
+    const dySq = dy * dy;
+    for (let col = 0; col < COLS; col++) {
+      const px     = GX_START + col * GRID;
+      const dx     = px - CX;
+      const distSq = dx * dx + dySq;
+      if (distSq > maxRSq) continue;
+
+      let on;
+      if (distSq <= solidRSq) {
+        on = true;
+      } else if (distSq >= fillRSq) {
+        on = false;
+      } else {
+        const dist  = Math.sqrt(distSq);
+        const t     = (dist - solidR) * invFadeR;
+        const bayer = BAYER[row & 7][col & 7];
+        on = bayer >= Math.floor(t * 64);
+      }
+
+      ctx.fillStyle = on ? colorDot : colorBg;
+      ctx.fillRect(px, py, DOT_SIZE, DOT_SIZE);
+    }
+  }
+}
+
+function drawScreen(fillPct, label1, label2, colorDot, colorBg, colorLabel) {
+  ctx.fillStyle = colorBg;
+  ctx.fillRect(0, 0, 240, 320);
+
+  drawHalftone(fillPct / 100, colorDot, colorBg);
+
+  ctx.fillStyle = colorLabel;
+  ctx.textAlign = 'center';
+  ctx.font = '14px monospace';
+  ctx.fillText(label1, 120, 268);
+  ctx.fillText(label2, 120, 286);
+
+  ctx.font = 'bold 20px monospace';
+  const valStr = Math.round(fillPct) + '%';
+  // +1 char offset matches slave code's leftPad + 1
+  ctx.fillText(valStr, 120 + 10, 310);
+}
+
+// Idle walk
+let idleVal = 50, idleVel = 0;
+
+function updateIdle() {
+  idleVel += (Math.random() * 2 - 1) * 0.05;
+  idleVel *= 0.95;
+  idleVel += (50 - idleVal) * 0.003;
+  idleVal += idleVel;
+  if (idleVal > 60) { idleVal = 60; idleVel = -Math.abs(idleVel); }
+  if (idleVal < 40) { idleVal = 40; idleVel =  Math.abs(idleVel); }
+}
+
+function loop() {
+  updateIdle();
+  drawScreen(idleVal, 'Bio-', 'diversity', DARK_GREY, LIGHT_GREY, DARK_GREY);
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>

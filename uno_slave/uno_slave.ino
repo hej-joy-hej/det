@@ -17,9 +17,9 @@
 // IMPORTANT: Unplug the wire from D0 before uploading via USB.
 //            Reconnect after upload is complete.
 
-#define SCREEN_TYPE 2   // ← change this (0 / 1 / 2) before uploading each unit
+#define SCREEN_TYPE 0   // ← change this (0 / 1 / 2) before uploading each unit
 // #define DEMO_MODE        // ← uncomment for demo mode
-#define ONE_SCREEN_MODE  // ← uncomment to cycle all three screens on one Uno
+// #define ONE_SCREEN_MODE  // ← uncomment to cycle all three screens on one Uno
 
 #include <SPI.h>
 #include <Adafruit_GFX.h>
